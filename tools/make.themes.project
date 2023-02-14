@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+#
+# Generate the source directory for claws-mail-themes package
+# from the theme tarballs in http://www.claws-mail.org/themes.php
+#
+# Copyright (c) 2006-2010 Ricardo Mones <ricardo@mones.org>
+#                         Paul Mangan <paul@claws-mail.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+# 
+
+test x$1 = x && echo "Error: version number not given" && exit 1;
+
+VERS=$1
+shift;
+SITE=http://www.claws-mail.org
+NAME=claws-mail-themes
+DDIR=$NAME-$VERS
+PAGE=themes.php
+LIST=themes.list
+WLOG=themes.wget.log
+
+function getListFromPage()
+{
+  test -f ${PAGE} && rm -f ${PAGE};
+  wget -q -a ${WLOG} ${SITE}/${PAGE}
+  test ! -f ${PAGE} && echo "Error: couldn't get ${PAGE}." && exit 1;
+
+  grep 'download.php?file=' ${PAGE} \
+       | cut -f2 -d\" \
+       > ${LIST}
+}
+
+function makeRoomForThemes()
+{
+  test -d ${DDIR} \
+    && rm -rf ${DDIR} \
+    && echo "Removing previous destination";
+  mkdir ${DDIR};
+}
+
+function downloadThemes()
+{
+  for theme in `cat ${LIST} `;
+  do tarf=`echo $theme | cut -f2 -d/ `;
+     test $tarf = "png" \
+         && tarf=`echo $theme | cut -f3 -d/ `;
+     echo -n "Downloading... ";
+     wget -q -a ${WLOG} -O ${DDIR}/$tarf ${SITE}/$theme
+     test ! -f ${DDIR}/$tarf && echo "Error: couldn't get $tarf" && exit 1;
+     pushd ${DDIR} > /dev/null
+     tarops="";
+     test ${tarf} = ${tarf/.tar.bz2/} && tarops="xzf" || tarops="xjf";
+     echo -n "unpacking... " \
+          && tar $tarops $tarf \
+	  && echo -n "deleting tarball... " \
+          && rm -f $tarf \
+	  && echo "Ok ($tarf)";
+     popd > /dev/null
+  done;
+}
+
+function removeWhitespaces()
+{
+  cd ${DDIR};
+  for dir in *;
+  do test -d "$dir" \
+       && test ! "${dir}" = "${dir/ /_}" \
+       && mv "${dir}" "${dir// /_}"; 
+  done;
+  cd "..";
+}
+
+function fixPermissions()
+{
+  find ${DDIR} -type d -exec chmod 755 '{}' +
+  find ${DDIR} -type f -exec chmod 644 '{}' +
+}
+
+function createProject()
+{
+  touch ${DDIR}/${NAME}
+}
+
+function createThemeMakefileAm()
+{
+  echo "Making $1";
+  MA="/tmp/tmp.makefile.am";
+  cd "$1"
+  dir="$1";
+  echo 'themedir = $(prefix)/share/claws-mail/themes/'${dir} > $MA
+  echo "" >> $MA
+  echo -n 'dist_theme_DATA =' >> $MA  
+  count_png=`ls -1 *.png 2> /dev/null | wc -l `
+  count_xpm=`ls -1 *.xpm 2> /dev/null | wc -l `
+  ext="xpm"
+  count=$count_xpm
+  if [ $count_png -gt $count_xpm ];
+  then ext="png";
+       count=$count_png; 
+  fi
+  i=1;
+  for px in `ls -1 *.${ext} `; 
+  do if [ $i -lt $count ]; 
+     then echo " $px \\" >> $MA; 
+     else echo " $px" >> $MA; 
+     fi; 
+     i=$((1 + $i)); 
+  done;
+  echo "" >> $MA;
+  count=`ls * | grep -v "\.${ext}$" | wc -l `;
+  if [ $count -gt 0 ];
+  then echo -n 'EXTRA_DIST =' >> $MA;
+       i=1;
+       for npx in `ls -1 * | grep -v "\.${ext}$" `;
+       do if [ $i -lt $count ];
+          then echo " $npx \\" >> $MA;
+          else echo " $npx" >> $MA;
+          fi;
+          i=$((1 + $i));
+       done;
+       echo "" >> $MA;
+  fi;
+  mv $MA Makefile.am
+  cd ".."
+}
+
+function createAutogenSh()
+{
+  cat<<EOA > ${DDIR}/autogen.sh
+#!/bin/sh
+
+aclocal \
+  && automake --add-missing --foreign --copy \
+  && autoconf \
+  && ./configure --enable-maintainer-mode $@
+EOA
+  chmod +x ${DDIR}/autogen.sh
+  echo "Created autogen.sh"
+}
+
+function createMakefileAm()
+{
+  cd ${DDIR}
+  MA=Makefile.am
+  if [ -f INSTALL ]
+  then echo "EXTRA_DIST = INSTALL "${NAME} > $MA
+  else echo "EXTRA_DIST = "${NAME} > $MA
+  fi
+  echo "" >> $MA
+  echo -n "SUBDIRS =" >> $MA
+  for dir in *;
+  do test -d "$dir" && echo -n " ${dir}" >> $MA;
+  done;
+  cd ".."
+  echo "Created Makefile.am"
+}
+
+function createConfigureAc()
+{
+  cd ${DDIR}
+  CA=configure.ac
+  echo 'AC_PREREQ(2.59d)' > $CA
+  echo 'AC_INIT('${NAME}')' >> $CA
+  echo 'AM_INIT_AUTOMAKE('${NAME}', '${VERS}')' >> $CA
+  cat >> $CA <<EOC
+
+AM_MAINTAINER_MODE
+
+dnl Checks for programs.
+AC_PROG_INSTALL
+
+AC_OUTPUT([
+Makefile
+EOC
+  # the list of Makefiles
+  for dir in *;
+  do test -d "$dir" \
+       && echo "${dir}/Makefile" >> $CA \
+       && createThemeMakefileAm "$dir";
+  done;
+  echo "])" >> $CA
+  cd "..";
+  echo "Created $CA";
+}
+
+function cleanMine()
+{
+  find ${DDIR} -name Makefile.am -delete
+  rm -f \
+     ${DDIR}/autogen.sh \
+     ${DDIR}/configure.ac \
+     ${DDIR}/${NAME}
+}
+
+function cleanGenerated()
+{
+  find ${DDIR} -name Makefile.in -delete
+  find ${DDIR} -name Makefile -delete
+  rm -rf ${DDIR}/autom4te.cache
+  rm -f \
+     ${DDIR}/aclocal.m4 \
+     ${DDIR}/install-sh \
+     ${DDIR}/missing \
+     ${DDIR}/config.status \
+     ${DDIR}/configure \
+     ${DDIR}/config.log
+}
+
+case "$1" in
+  --clean)
+      cleanMine;      
+      echo "Cleaned.";
+    ;;
+  --clean-all)
+      cleanMine;
+      cleanGenerated;
+      echo "Cleaned all.";
+    ;;
+  --download)
+      getListFromPage;
+      makeRoomForThemes;
+      downloadThemes;
+      echo "Downloaded.";
+    ;;
+  --autotoolize)
+      removeWhitespaces;
+      fixPermissions;
+      createProject;
+      createAutogenSh;
+      createMakefileAm;
+      createConfigureAc;
+      echo "Autotoolized.";
+    ;;
+  --all)
+    $0 $VERS --download
+    $0 $VERS --autotoolize
+    echo "Done.";
+    ;;
+  *)
+      echo "Syntax: ";
+      echo "  $0 vers {--clean[-all]|--download|--autotoolize|--all}"
+    ;;
+esac
+
